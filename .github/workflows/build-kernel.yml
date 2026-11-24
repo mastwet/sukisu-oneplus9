@@ -71,6 +71,10 @@ jobs:
           git checkout "$KERNEL_COMMIT" || { git fetch origin "$KERNEL_COMMIT" && git checkout "$KERNEL_COMMIT"; }
           git log -1 --oneline
           git rev-parse HEAD
+          # 固定 SCM 版本：否则我们的源码改动会让 setlocalversion 追加 -dirty，
+          # 破坏厂商模块的 vermagic 匹配。.scmversion 存在时 setlocalversion 直接返回它。
+          printf '%s' "-g${KERNEL_COMMIT}" > .scmversion
+          echo "[*] .scmversion = $(cat .scmversion)"
 
       - name: Integrate SukiSU (builtin-new)
         env:

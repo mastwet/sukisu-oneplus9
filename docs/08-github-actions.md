@@ -24,15 +24,19 @@ git push -u origin main
 1. 仓库页面 → **Actions** → 左侧 **build-sukisu-kernel-lemonade** → **Run workflow**；
 2. 参数：
    - `jobs`：并行数，默认 `3`。若日志出现 OOM/被杀，降到 `2`；
-   - `sukisu_tag`：默认 `v3.0.0`（必须与管理器 Nova v3.0.0 配套）。
+   - `sukisu_branch`：默认 `builtin-new`。旧的 5.4 内核必须用 `builtin-new`
+     （`main`/v3.0.0 只支持 5.7+ 的 SELinux 布局）。
 3. 首次构建中，流水线会自动：
    - 腾磁盘（删 dotnet/android/ghc 等预装，防 `No space left`）；
    - 装依赖 + 下载 LLVM 21.1.0；
    - 拉内核源码并锁定 `21b3312486b8`；
-   - 集成 SukiSU（自建 Git 优先，失败自动回退 GitHub 镜像）；
-   - 编译 `Image` 并自检 `kernel.release == 5.4.302-qgki-g21b3312486b8`。
+   - 集成 SukiSU `builtin-new`（symlink 进 `drivers/kernelsu`），开启
+     `CONFIG_KSU` + `CONFIG_KSU_TAMPER_SYSCALL_TABLE` + `CONFIG_KSU_LSM_SECURITY_HOOKS`；
+   - 关闭 `CONFIG_CC_WERROR` 并用 `-Wno-error` 编译（clang 21 对老内核更严格）；
+   - 编译 `Image` 并自检 `kernel.release == 5.4.302-qgki-g21b3312486b8`、`CONFIG_KSU=y`。
 
-> 若失败，先看是哪一步：磁盘 → 加大腾盘/换 larger runner；OOM → 降低 `jobs`；SukiSU → 看是否走了 GitHub 兜底。
+> 若失败，先看是哪一步：磁盘 → 加大腾盘/换 larger runner；OOM → 降低 `jobs`；
+> SukiSU → 确认分支为 `builtin-new`、`CONFIG_SECURITY_SELINUX=y`。
 
 ## 3. 下载产物
 
