@@ -103,6 +103,24 @@ jobs:
           scripts/config --file "arch/arm64/configs/$DEFCONFIG" -d CC_WERROR || true
           grep -n 'CC_WERROR' "arch/arm64/configs/$DEFCONFIG" || true
 
+      - name: Patch SukiSU for kernel 5.4
+        run: |
+          cd kernel
+          KSU="$(readlink -f drivers/kernelsu)"
+          test -d "$KSU"
+          echo "[*] SukiSU source: $KSU"
+          # 5.4 没有 <linux/pgtable.h>(5.8+) 和 <linux/minmax.h>(5.11+)，
+          # 换成本内核存在的等价头文件。
+          for pair in "linux/pgtable.h|asm/pgtable.h" "linux/minmax.h|linux/kernel.h"; do
+            old="${pair%%|*}"; new="${pair##*|}"
+            grep -rl --include='*.c' --include='*.h' "$old" "$KSU" 2>/dev/null | while read -r f; do
+              sed -i "s|#include <$old>|#include <$new>|" "$f"
+              echo "  patch ${f#$KSU/}: $old -> $new"
+            done || true
+          done
+          echo "[*] 校验无残留:"
+          grep -rn --include='*.c' --include='*.h' -e 'linux/pgtable.h' -e 'linux/minmax.h' "$KSU" || echo "  clean"
+
       - name: Configure defconfig
         run: |
           cd kernel
