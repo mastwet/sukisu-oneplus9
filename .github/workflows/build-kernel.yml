@@ -8,10 +8,10 @@ on:
         description: "并行编译任务数（免费 runner 内存小，建议 3；OOM 时降到 2）"
         required: false
         default: "3"
-      sukisu_tag:
-        description: "SukiSU-Nova 标签（需与管理器版本配套）"
+      sukisu_branch:
+        description: "SukiSU-Nova 分支（旧内核 5.4 用 builtin-new）"
         required: false
-        default: "v3.0.0"
+        default: "builtin-new"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,7 +23,6 @@ env:
   KERNEL_COMMIT: 21b3312486b8
   KERNEL_RELEASE: 5.4.302-qgki-g21b3312486b8
   DEFCONFIG: vendor/lahaina-qgki_defconfig
-  SUKISU_SETUP_URL: https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/raw/branch/main/kernel/setup.sh
   SUKISU_NOVA_REPO: https://github.com/SukiSU-Nova/SukiSU-Nova
   LLVM_TARBALL_URL: https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz
 
@@ -32,10 +31,6 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
-      # 取回本仓库（补丁脚本 scripts/patch-sukisu-5.4.py 需要用）
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
       # 免费 runner 根盘仅剩约 14G，内核 LTO 构建要 20~30G。
       # 先删掉用不到的大块预装组件回收空间，否则会 No space left on device。
       - name: Free disk space (best effort)
@@ -77,46 +72,28 @@ jobs:
           git log -1 --oneline
           git rev-parse HEAD
 
-      - name: Integrate SukiSU (kprobe main line)
+      - name: Integrate SukiSU (builtin-new)
         env:
-          SUKISU_TAG: ${{ inputs.sukisu_tag }}
+          SUKISU_BRANCH: ${{ inputs.sukisu_branch }}
         run: |
           cd kernel
-          ok=0
-          if curl -LSsf "$SUKISU_SETUP_URL" -o /tmp/sukisu-setup.sh && sh /tmp/sukisu-setup.sh "$SUKISU_TAG"; then
-            [ -e drivers/kernelsu ] && ok=1
-          fi
-          if [ "$ok" -ne 1 ]; then
-            echo "::warning::setup.sh 不可用或失败，使用 GitHub 镜像手工集成"
-            git checkout -- drivers/Makefile drivers/Kconfig 2>/dev/null || true
-            rm -rf drivers/kernelsu KernelSU
-            git clone --depth 1 "$SUKISU_NOVA_REPO" KernelSU
-            git -C KernelSU checkout "$SUKISU_TAG" 2>/dev/null || true
-            ln -sfn ../KernelSU/kernel drivers/kernelsu
-            grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
-            grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          fi
+          echo "[*] clone SukiSU-Nova @ $SUKISU_BRANCH"
+          git clone --depth 1 -b "$SUKISU_BRANCH" "$SUKISU_NOVA_REPO" KernelSU
+          test -f KernelSU/kernel/Kconfig
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
+          grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           test -e drivers/kernelsu
           grep -n 'kernelsu' drivers/Makefile drivers/Kconfig | head
-          echo "[*] 打开 CONFIG_KSU=y"
-          scripts/config --file "arch/arm64/configs/$DEFCONFIG" -e KSU
-          grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEFCONFIG"
-          # LLVM 21 比 LineageOS 预期工具链更新，会对老内核源码报新告警；
-          # 内核 -Werror 会把告警当错误。关闭 WERROR（不影响代码生成/LTO/CFI）。
-          echo "[*] 关闭 CONFIG_CC_WERROR"
-          scripts/config --file "arch/arm64/configs/$DEFCONFIG" -d CC_WERROR || true
-          grep -n 'CC_WERROR' "arch/arm64/configs/$DEFCONFIG" || true
-
-      - name: Patch SukiSU for kernel 5.4
-        run: |
-          cd kernel
-          KSU="$(readlink -f drivers/kernelsu)"
-          test -d "$KSU"
-          echo "[*] SukiSU source: $KSU"
-          python3 "$GITHUB_WORKSPACE/scripts/patch-sukisu-5.4.py" "$KSU"
-          echo "[*] 校验:"
-          (grep -rn --include='*.c' --include='*.h' -e 'linux/pgtable.h' -e 'linux/minmax.h' "$KSU" && exit 1) || echo "  headers clean"
-          grep -n 'handle_event' "$KSU/manager/pkg_observer.c"
+          echo "[*] 配置 CONFIG_KSU + 非 GKI arm64 hook（syscall table + LSM）"
+          D="arch/arm64/configs/$DEFCONFIG"
+          scripts/config --file "$D" -e KSU
+          scripts/config --file "$D" -e KSU_TAMPER_SYSCALL_TABLE
+          scripts/config --file "$D" -e KSU_LSM_SECURITY_HOOKS
+          scripts/config --file "$D" -e KALLSYMS || true
+          # LLVM 21 比老内核预期工具链更严格，关掉 -Werror 避免告警变错误。
+          scripts/config --file "$D" -d CC_WERROR || true
+          grep -nE 'CONFIG_(KSU|CC_WERROR)' "$D" | head
 
       - name: Configure defconfig
         run: |
@@ -135,7 +112,7 @@ jobs:
 
       - name: Self-check
         env:
-          SUKISU_TAG: ${{ inputs.sukisu_tag }}
+          SUKISU_BRANCH: ${{ inputs.sukisu_branch }}
         run: |
           cd "$GITHUB_WORKSPACE"
           REL=$(cat out/include/config/kernel.release)
@@ -144,14 +121,15 @@ jobs:
             echo "::error::kernel.release 不匹配（$REL != $KERNEL_RELEASE），禁止发版"
             exit 1
           fi
-          grep -E '^CONFIG_(KSU|LTO_CLANG|CFI_CLANG|MODVERSIONS)=y' out/.config
+          grep -E '^CONFIG_(KSU|KSU_TAMPER_SYSCALL_TABLE|LTO_CLANG|CFI_CLANG|MODVERSIONS)=y' out/.config
+          grep -q '^CONFIG_KSU=y' out/.config || { echo "::error::CONFIG_KSU 未生效（检查 SECURITY_SELINUX）"; exit 1; }
           ls -l out/arch/arm64/boot/Image
           file out/arch/arm64/boot/Image
           {
             echo "kernel_release=$REL"
             echo "kernel_commit=$(git -C kernel rev-parse HEAD)"
             echo "kernel_commit_short=$(git -C kernel rev-parse --short HEAD)"
-            echo "sukisu_tag=$SUKISU_TAG"
+            echo "sukisu_branch=$SUKISU_BRANCH"
             echo "clang=$(clang --version | head -1)"
             echo "run_id=${GITHUB_RUN_ID}"
             echo "sha256_image=$(sha256sum out/arch/arm64/boot/Image | awk '{print $1}')"
