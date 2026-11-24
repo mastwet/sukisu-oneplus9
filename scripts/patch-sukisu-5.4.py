@@ -8,6 +8,7 @@ Differences handled:
      `handle_inode_event` layout.
   3. TWA_RESUME / TWA_SIGNAL (5.8+) are used by a few files without a guard.
   4. put_task_struct() needs <linux/sched/task.h> in some files.
+  5. struct clocksource.vdso_clock_mode (5.8+) is used by cpu_spoof.c.
 
 Usage: patch-sukisu-5.4.py <path-to-KernelSU/kernel>
 """
@@ -32,42 +33,50 @@ TW_GUARD = (
 )
 
 
-def has_include(text: str, name: str) -> bool:
+def read_text(path):
+    # Source files may contain non-UTF-8 bytes; round-trip them untouched.
+    return path.read_text(encoding="utf-8", errors="surrogateescape")
+
+
+def write_text(path, text):
+    path.write_text(text, encoding="utf-8", errors="surrogateescape")
+
+
+def has_include(text, name):
     return f"#include <{name}>" in text
 
 
-def insert_after_last_include(text: str, block: str) -> str:
+def insert_after_last_include(text, block):
     lines = text.splitlines()
     idx = None
     for i, line in enumerate(lines):
         if line.lstrip().startswith("#include"):
             idx = i
     if idx is None:
-        out = block + "\n" + text
-    else:
-        lines.insert(idx + 1, block)
-        out = "\n".join(lines)
-        if text.endswith("\n"):
-            out += "\n"
+        return block + "\n" + text
+    lines.insert(idx + 1, block)
+    out = "\n".join(lines)
+    if text.endswith("\n"):
+        out += "\n"
     return out
 
 
-def patch_headers(root: pathlib.Path) -> None:
+def patch_headers(root):
     for path in root.rglob("*"):
         if path.suffix not in (".c", ".h"):
             continue
-        text = path.read_text(errors="ignore")
+        text = read_text(path)
         new = text
         for old, repl in HEADER_MAP.items():
             new = new.replace(old, repl)
         if new != text:
-            path.write_text(new)
+            write_text(path, new)
             print(f"[+] header patch: {path.relative_to(root)}")
 
 
-def patch_fsnotify(root: pathlib.Path) -> None:
+def patch_fsnotify(root):
     path = root / "manager" / "pkg_observer.c"
-    text = path.read_text()
+    text = read_text(path)
     if ".handle_event = ksu_handle_event" in text:
         print("[=] fsnotify already patched")
         return
@@ -108,15 +117,19 @@ def patch_fsnotify(root: pathlib.Path) -> None:
     if not ops_re.search(text):
         raise SystemExit("[!] could not find ksu_ops initializer")
     text = ops_re.sub(new_ops, text, count=1)
-    path.write_text(text)
+    write_text(path, text)
     print("[+] fsnotify ops patched for 5.4")
 
 
-def patch_task_work_and_includes(root: pathlib.Path) -> None:
+def patch_task_work_and_includes(root):
     for path in root.rglob("*.c"):
-        text = path.read_text(errors="ignore")
+        text = read_text(path)
         block = []
-        if ("TWA_RESUME" in text or "TWA_SIGNAL" in text) and "!defined(TWA_RESUME)" not in text:
+        if (
+            ("TWA_RESUME" in text or "TWA_SIGNAL" in text)
+            and "!defined(TWA_RESUME)" not in text
+            and "#ifndef TWA_RESUME" not in text
+        ):
             if not has_include(text, "linux/version.h"):
                 block.append("#include <linux/version.h>")
             block.append(TW_GUARD)
@@ -125,11 +138,32 @@ def patch_task_work_and_includes(root: pathlib.Path) -> None:
         if not block:
             continue
         new = insert_after_last_include(text, "\n".join(block))
-        path.write_text(new)
+        write_text(path, new)
         print(f"[+] compat block: {path.relative_to(root)}")
 
 
-def main() -> None:
+def patch_cpu_spoof(root):
+    path = root / "extension" / "cpu_spoof.c"
+    text = read_text(path)
+    if "vdso_clock_mode added in 5.8" in text:
+        print("[=] cpu_spoof already patched")
+        return
+    pat = re.compile(
+        r"\(\*curr_cs_ptr\)->vdso_clock_mode\s*=\s*\n\s*VDSO_CLOCKMODE_ARCHTIMER;"
+    )
+    repl = (
+        "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) /* vdso_clock_mode added in 5.8 */\n"
+        "                        (*curr_cs_ptr)->vdso_clock_mode =\n"
+        "                            VDSO_CLOCKMODE_ARCHTIMER;\n"
+        "#endif"
+    )
+    if not pat.search(text):
+        raise SystemExit("[!] could not find vdso_clock_mode assignment in cpu_spoof.c")
+    write_text(path, pat.sub(repl, text, count=1))
+    print("[+] cpu_spoof vdso_clock_mode guarded")
+
+
+def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
     root = pathlib.Path(sys.argv[1])
@@ -138,6 +172,7 @@ def main() -> None:
     patch_headers(root)
     patch_fsnotify(root)
     patch_task_work_and_includes(root)
+    patch_cpu_spoof(root)
     print("[+] done")
 
 
