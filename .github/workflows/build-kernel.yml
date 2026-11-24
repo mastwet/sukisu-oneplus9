@@ -97,6 +97,11 @@ jobs:
           echo "[*] 打开 CONFIG_KSU=y"
           scripts/config --file "arch/arm64/configs/$DEFCONFIG" -e KSU
           grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEFCONFIG"
+          # LLVM 21 比 LineageOS 预期工具链更新，会对老内核源码报新告警；
+          # 内核 -Werror 会把告警当错误。关闭 WERROR（不影响代码生成/LTO/CFI）。
+          echo "[*] 关闭 CONFIG_CC_WERROR"
+          scripts/config --file "arch/arm64/configs/$DEFCONFIG" -d CC_WERROR || true
+          grep -n 'CC_WERROR' "arch/arm64/configs/$DEFCONFIG" || true
 
       - name: Configure defconfig
         run: |
@@ -109,7 +114,9 @@ jobs:
           cd kernel
           echo "jobs = ${{ inputs.jobs }}   nproc = $(nproc)   memory: $(free -h | awk '/Mem:/{print $2}')"
           df -h /
-          make O="$GITHUB_WORKSPACE/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 Image -j"${{ inputs.jobs }}"
+          make O="$GITHUB_WORKSPACE/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            KCFLAGS="-Wno-error" KAFLAGS="-Wno-error" \
+            Image -j"${{ inputs.jobs }}"
 
       - name: Self-check
         env:
