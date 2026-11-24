@@ -23,7 +23,6 @@ env:
   KERNEL_COMMIT: 21b3312486b8
   KERNEL_RELEASE: 5.4.302-qgki-g21b3312486b8
   DEFCONFIG: vendor/lahaina-qgki_defconfig
-  SUKISU_TAG: ${{ inputs.sukisu_tag }}
   SUKISU_SETUP_URL: https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/raw/branch/main/kernel/setup.sh
   SUKISU_NOVA_REPO: https://github.com/SukiSU-Nova/SukiSU-Nova
   LLVM_TARBALL_URL: https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz
@@ -75,6 +74,8 @@ jobs:
           git rev-parse HEAD
 
       - name: Integrate SukiSU (kprobe main line)
+        env:
+          SUKISU_TAG: ${{ inputs.sukisu_tag }}
         run: |
           cd kernel
           ok=0
@@ -111,6 +112,8 @@ jobs:
           make O="$GITHUB_WORKSPACE/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 Image -j"${{ inputs.jobs }}"
 
       - name: Self-check
+        env:
+          SUKISU_TAG: ${{ inputs.sukisu_tag }}
         run: |
           cd "$GITHUB_WORKSPACE"
           REL=$(cat out/include/config/kernel.release)
