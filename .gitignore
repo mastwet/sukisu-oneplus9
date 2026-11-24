@@ -1,0 +1,22 @@
+# 构建工作区 / 产物
+/work/
+/out/
+kernel/
+*.img
+*.sha256
+stock_boot.img
+new-boot.img
+boot_*.img
+
+# 临时 / 系统
+*.tar
+*.tar.gz
+*.tar.xz
+*.zip
+.DS_Store
+Thumbs.db
+
+# 工具配置
+/.commandcode/
+/.vscode/
+/.idea/

@@ -1,0 +1,148 @@
+name: build-sukisu-kernel-lemonade
+
+# 手动触发：Actions 页面 -> build-sukisu-kernel-lemonade -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "并行编译任务数（免费 runner 内存小，建议 3；OOM 时降到 2）"
+        required: false
+        default: "3"
+      sukisu_tag:
+        description: "SukiSU-Nova 标签（需与管理器版本配套）"
+        required: false
+        default: "v3.0.0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_oneplus_sm8350
+  KERNEL_BRANCH: lineage-23.2
+  KERNEL_COMMIT: 21b3312486b8
+  KERNEL_RELEASE: 5.4.302-qgki-g21b3312486b8
+  DEFCONFIG: vendor/lahaina-qgki_defconfig
+  SUKISU_TAG: ${{ inputs.sukisu_tag }}
+  SUKISU_SETUP_URL: https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/raw/branch/main/kernel/setup.sh
+  SUKISU_NOVA_REPO: https://github.com/SukiSU-Nova/SukiSU-Nova
+  LLVM_TARBALL_URL: https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      # 免费 runner 根盘仅剩约 14G，内核 LTO 构建要 20~30G。
+      # 先删掉用不到的大块预装组件回收空间，否则会 No space left on device。
+      - name: Free disk space (best effort)
+        run: |
+          echo "== before =="; df -h /
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean || true
+          echo "== after =="; df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev lz4 cpio \
+                                  python3 rsync git curl xz-utils build-essential
+
+      - name: Download LLVM 21.1.0 toolchain
+        run: |
+          mkdir -p "$HOME/toolchain"
+          curl -L --retry 3 --retry-delay 5 -o /tmp/llvm.tar.xz "$LLVM_TARBALL_URL"
+          tar -xf /tmp/llvm.tar.xz -C "$HOME/toolchain" --strip-components=1
+          rm -f /tmp/llvm.tar.xz
+          echo "$HOME/toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          clang --version | head -1
+          ld.lld --version | head -1
+          command -v llvm-ar >/dev/null && echo "llvm-ar OK"
+
+      - name: Fetch kernel source at pinned commit
+        run: |
+          git clone --filter=blob:none --single-branch -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          git checkout "$KERNEL_COMMIT" || { git fetch origin "$KERNEL_COMMIT" && git checkout "$KERNEL_COMMIT"; }
+          git log -1 --oneline
+          git rev-parse HEAD
+
+      - name: Integrate SukiSU (kprobe main line)
+        run: |
+          cd kernel
+          ok=0
+          if curl -LSsf "$SUKISU_SETUP_URL" -o /tmp/sukisu-setup.sh && sh /tmp/sukisu-setup.sh "$SUKISU_TAG"; then
+            [ -e drivers/kernelsu ] && ok=1
+          fi
+          if [ "$ok" -ne 1 ]; then
+            echo "::warning::setup.sh 不可用或失败，使用 GitHub 镜像手工集成"
+            git checkout -- drivers/Makefile drivers/Kconfig 2>/dev/null || true
+            rm -rf drivers/kernelsu KernelSU
+            git clone --depth 1 "$SUKISU_NOVA_REPO" KernelSU
+            git -C KernelSU checkout "$SUKISU_TAG" 2>/dev/null || true
+            ln -sfn ../KernelSU/kernel drivers/kernelsu
+            grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+            grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          fi
+          test -e drivers/kernelsu
+          grep -n 'kernelsu' drivers/Makefile drivers/Kconfig | head
+          echo "[*] 打开 CONFIG_KSU=y"
+          scripts/config --file "arch/arm64/configs/$DEFCONFIG" -e KSU
+          grep -n 'CONFIG_KSU' "arch/arm64/configs/$DEFCONFIG"
+
+      - name: Configure defconfig
+        run: |
+          cd kernel
+          make O="$GITHUB_WORKSPACE/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 "$DEFCONFIG"
+          grep -q '^CONFIG_KSU=y' "$GITHUB_WORKSPACE/out/.config" && echo "CONFIG_KSU=y OK"
+
+      - name: Build kernel Image
+        run: |
+          cd kernel
+          echo "jobs = ${{ inputs.jobs }}   nproc = $(nproc)   memory: $(free -h | awk '/Mem:/{print $2}')"
+          df -h /
+          make O="$GITHUB_WORKSPACE/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 Image -j"${{ inputs.jobs }}"
+
+      - name: Self-check
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          REL=$(cat out/include/config/kernel.release)
+          echo "kernel.release = $REL"
+          if [ "$REL" != "$KERNEL_RELEASE" ]; then
+            echo "::error::kernel.release 不匹配（$REL != $KERNEL_RELEASE），禁止发版"
+            exit 1
+          fi
+          grep -E '^CONFIG_(KSU|LTO_CLANG|CFI_CLANG|MODVERSIONS)=y' out/.config
+          ls -l out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
+          {
+            echo "kernel_release=$REL"
+            echo "kernel_commit=$(git -C kernel rev-parse HEAD)"
+            echo "kernel_commit_short=$(git -C kernel rev-parse --short HEAD)"
+            echo "sukisu_tag=$SUKISU_TAG"
+            echo "clang=$(clang --version | head -1)"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "sha256_image=$(sha256sum out/arch/arm64/boot/Image | awk '{print $1}')"
+          } | tee out/build-meta.txt
+          sha256sum out/arch/arm64/boot/Image > out/Image.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: |
+            out/arch/arm64/boot/Image
+            out/include/config/kernel.release
+            out/.config
+            out/System.map
+            out/build-meta.txt
+            out/Image.sha256
+          if-no-files-found: error
+          retention-days: 30

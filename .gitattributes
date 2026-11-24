@@ -1,0 +1,7 @@
+# 统一换行，避免 Windows 下被转成 CRLF 导致 Linux 端脚本/YAML 出错
+* text=auto eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.env  text eol=lf
+*.md   text eol=lf

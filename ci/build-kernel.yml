@@ -1,0 +1,91 @@
+name: build-sukisu-kernel-lemonade
+
+# 手动触发：Actions 页面 -> Run workflow
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_oneplus_sm8350
+  KERNEL_COMMIT: 21b3312486b8
+  KERNEL_RELEASE: 5.4.302-qgki-g21b3312486b8
+  SUKISU_TAG: v3.0.0
+  SUKISU_SETUP_URL: https://git.zako.shirkneko.top:20004/shirkneko/SukiSU/raw/branch/main/kernel/setup.sh
+  SUKISU_NOVA_REPO: https://github.com/SukiSU-Nova/SukiSU-Nova
+  DEFCONFIG: vendor/lahaina-qgki_defconfig
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev lz4 cpio python3 rsync git curl xz-utils
+
+      - name: Download LLVM 21.1.0 toolchain
+        run: |
+          mkdir -p "$HOME/toolchain"
+          curl -L -o /tmp/llvm.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz
+          tar -xf /tmp/llvm.tar.xz -C "$HOME/toolchain" --strip-components=1
+          echo "$HOME/toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch kernel source at pinned commit
+        run: |
+          git clone --filter=blob:none --single-branch -b lineage-23.2 "$KERNEL_REPO" kernel
+          cd kernel
+          git checkout "$KERNEL_COMMIT" || { git fetch origin "$KERNEL_COMMIT" && git checkout "$KERNEL_COMMIT"; }
+          git log -1 --oneline
+
+      - name: Integrate SukiSU (kprobe main line)
+        run: |
+          cd kernel
+          ok=0
+          if curl -LSs "$SUKISU_SETUP_URL" -o /tmp/sukisu-setup.sh && sh /tmp/sukisu-setup.sh "$SUKISU_TAG"; then
+            [ -e drivers/kernelsu ] && ok=1
+          fi
+          if [ "$ok" -ne 1 ]; then
+            echo "::warning::setup.sh 不可用或失败，使用 GitHub 镜像手工集成"
+            git checkout -- drivers/Makefile drivers/Kconfig 2>/dev/null || true
+            rm -rf drivers/kernelsu KernelSU
+            git clone --depth 1 "$SUKISU_NOVA_REPO" KernelSU
+            git -C KernelSU checkout "$SUKISU_TAG" || true
+            ln -sf ../KernelSU/kernel drivers/kernelsu
+            grep -q kernelsu drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+            grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          fi
+          test -e drivers/kernelsu
+          scripts/config --file "arch/arm64/configs/$DEFCONFIG" -e KSU
+          grep -n CONFIG_KSU "arch/arm64/configs/$DEFCONFIG"
+
+      - name: Build kernel Image
+        run: |
+          cd kernel
+          clang --version | head -1
+          ld.lld --version | head -1
+          make O=../out ARCH=arm64 LLVM=1 LLVM_IAS=1 "$DEFCONFIG"
+          make O=../out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image -j"$(nproc)"
+
+      - name: Self-check
+        run: |
+          REL=$(cat out/include/config/kernel.release)
+          echo "kernel.release = $REL"
+          if [ "$REL" != "$KERNEL_RELEASE" ]; then
+            echo "::error::kernel.release 不匹配（$REL != $KERNEL_RELEASE），禁止发版"
+            exit 1
+          fi
+          grep -E '^CONFIG_(KSU|LTO_CLANG|CFI_CLANG|MODVERSIONS)=y' out/.config
+          ls -l out/arch/arm64/boot/Image
+          sha256sum out/arch/arm64/boot/Image
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: |
+            out/arch/arm64/boot/Image
+            out/include/config/kernel.release
+            out/.config
+            out/System.map
+          if-no-files-found: error
